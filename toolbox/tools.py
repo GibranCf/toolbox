@@ -25,6 +25,7 @@ def list_files(path2Data,pattern='.'):
                 files.append(matchfile)
     if len(files) > 1: 
         warnings.warn('More than one file matched the pattern ')
+    return files
 def to_date(string, format):
     """
     Passes string to datetime object given date format 
@@ -95,15 +96,14 @@ def expandDt(data,axis,expvals,expcol):
     """
     expdt = pd.DataFrame()
     gdata = data.groupby(axis)
-    for index, df in gdata:
-        df.sort_values([expcol]+axis,inplace=True)
-        df['value_' +  expcol] = df[expcol]
-        valsdt = pd.DataFrame()
-        valsdt[expcol] = expvals
-        df = pd.merge(valsdt,df,how='outer',indicator=True).sort_values(expcol)
-        datevals = dt[[expcol,'value_'+expcol]].drop_duplicates().fillna(method='ffill').fillna(method='backfill')
-        dt = pd.merge(datevals,df.drop(columns=expcol)).drop(columns='value_'+expcol)
-        expdt = expdt.append(dt,ignore_index=False)
+    df.sort_values([expcol]+axis,inplace=True)
+    df['value_' +  expcol] = df[expcol]
+    valsdt = pd.DataFrame()
+    valsdt[expcol] = expvals
+    df = pd.merge(valsdt,df,how='outer',indicator=True).sort_values(expcol)
+    datevals = dt[[expcol,'value_'+expcol]].drop_duplicates().fillna(method='ffill').fillna(method='backfill')
+    dt = pd.merge(datevals,df.drop(columns=expcol)).drop(columns='value_'+expcol)
+    expdt = expdt.append(dt,ignore_index=False)
     return expdt
 def expandDiscDt(data,expand_dt,axis_cols,expand_axis):
     axisdt = data[axis_cols].drop_duplicates()
@@ -119,3 +119,89 @@ def expandDiscDt(data,expand_dt,axis_cols,expand_axis):
     fulldata=pd.merge(data_axis,data,how='outer',indicator=True).sort_values(axis_cols)
     return fulldata
 
+# To get completeness, unique values, regexes found and categorical/numerical/ID identification
+def dataOverview(rawdata,min_completeness = .7,sample_size=.1):
+    sampledata=rawdata.sample(frac=sample_size)
+    dfChars = pd.DataFrame(sampledata.apply(lambda col: regexChars(uniqueChars(col))))
+    dfChars.columns = ['regex']
+    completeness = pd.DataFrame(rawdata.apply(lambda x: (~x.isna()).sum()/len(x)))
+    completeness.columns = ['completeness']
+    varstatus=pd.merge(dfChars,completeness,right_index=True,left_index=True)
+    varstatus['drop'] = False
+    varstatus.loc[varstatus['completeness']<=min_completeness,['drop']] = True
+    uniquevals=pd.DataFrame(rawdata.apply(lambda x: (x.nunique())))
+    uniquevals.columns=['unique_values']
+    varstatus=pd.merge(varstatus,uniquevals,right_index=True,left_index=True)
+    varstatus['type'] = 'categorical'
+    varstatus=varstatus.reset_index().rename(columns={'index':'column'})
+    varstatus['type']=varstatus.apply(lambda x: 
+                           'numerical' if bool(re.search('d',x.regex)) and 
+                         (not bool(re.search('w',x.regex))) else 'categorical',axis=1)
+    varstatus['type']=varstatus.apply(lambda x:
+                   'ID' if  bool(re.search('^\W*(id)\W*',x.column,flags=re.IGNORECASE)) and 
+                    (x.unique_values > varstatus.shape[0]*.8)else x.type,axis=1)
+    headunique=rawdata.apply(lambda x: list(x[~x.isna()].unique()[0:5]))
+    if type(headunique) is pd.core.frame.DataFrame:
+        uniquevalsDT = {}
+        for col in rawdata.columns: 
+            uvals = ','.join(list(pd.Series(rawdata[col].unique()).apply(lambda x: str(x))[0:5]))
+            uniquevalsDT[col] = [uvals]
+        headunique = pd.DataFrame(uniquevalsDT).T.reset_index().rename(columns={'index':'column',0:'5first_unique_vals'})
+    else: 
+        headunique=pd.DataFrame(headunique).reset_index().rename(columns={'index':'column',0:'5first_unique_vals'})
+    varstatus = pd.merge(varstatus,headunique)
+    numdescribe = pd.DataFrame()
+    numcols = varstatus[varstatus['type']=='numerical']['column'].unique()
+    for col in numcols:
+        dt=pd.DataFrame(rawdata[col].describe()).transpose().drop(columns='count')
+        dt['column'] = col
+        numdescribe = numdescribe.append(dt,
+                                         ignore_index=True)
+    varstatus=pd.merge(varstatus,numdescribe,how='left')
+    return varstatus
+def regexExtract(string,regex):
+    substrings = re.finditer(regex, string)
+    substrings = [match.group(0) for match in substrings]
+    if len(substrings) == 0:
+        substrings = ['']
+    return substrings
+    # True if you can iterate in the object
+def isIterable(obj,string=False):
+    try: 
+        iter(obj)
+        iterable = True
+    except:
+        iterable = False
+    if not string and type(obj) is str:
+        iterable = False
+    return iterable
+# returns a string indicating which regexes match from a list
+def regexChars(x, regexes = ['\d','\s','\w']):
+    mstring = ''
+    for regex in regexes: 
+        rsearch=re.search(regex,x)
+        if rsearch is not None: 
+            mstring = mstring + regex
+            x = re.sub(regex,'',x)
+    mstring = mstring + x
+    return mstring
+# returns the set of unique characters in a string or iterable of strings
+def uniqueChars(x):
+    if x is np.NAN:
+        x = ''
+    if isIterable(x,string=False):
+        x=pd.Series(x)
+        x = x[~x.isna()]
+        uchars = functools.reduce(lambda z,w: ''.join(np.unique( [  t for t in (str(z) + str(w)) ]    ) ) ,x.append(pd.Series([''])))
+    elif type(x) is str :
+        uchars = ''.join(list(np.unique([y for y in x])))
+    return uchars
+def decode(string,from_encoding='ISO-8859-1',to_encoding='utf-8'):
+    if type(string) is str:
+        try: 
+            decoded = string.encode(from_encoding).decode(to_encoding)
+        except :
+            decoded = string
+    else:
+        decoded = np.nan
+    return decoded
